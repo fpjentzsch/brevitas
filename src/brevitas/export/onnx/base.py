@@ -43,21 +43,13 @@ class ONNXBaseManager(BaseManager, ABC):
             export_kwargs['enable_onnx_checker'] = False
 
     @classmethod
-    def export_onnx(
+    def _export_impl(
             cls,
             module: Module,
             input_shape: Tuple[int, ...],
             export_path: str,
-            input_t: Optional[Union[Tensor, QuantTensor]] = None,
+            input_t: Optional[Union[Tensor, QuantTensor]],
             **kwargs):
-        """
-        * input_shape : tuple describing the shape of network input e.g. (1, 1, 28, 28)
-        * export_path : ONNX filename to export to
-        * input_t : if specified, do an initial forward pass with this value. this
-                    may be necessary for QuantTensor caching.
-        * torch_onnx_kwargs : will be passed as kwargs to torch.onnx.export
-        """
-
         if onnx is None or opt is None:
             raise ModuleNotFoundError("Installation of ONNX is required.")
 
@@ -70,10 +62,11 @@ class ONNXBaseManager(BaseManager, ABC):
             module.apply(cls.set_export_handler)
             if input_t is None:
                 input_t = torch.empty(input_shape, dtype=torch.float)
-            # do a forward pass with the dummy input to e.g. store input/output shapes
+            # do a forward pass with the input to e.g. store input/output shapes
             cls.cache_inp_out(module, input_t)
-            # override any given input_t to make sure it's a standard PyTorch tensor
-            input_t = torch.empty(input_shape, dtype=torch.float)
+            # Dequantize QuantTensor, if any
+            if isinstance(input_t, QuantTensor):
+                input_t = input_t.value
             # enable export mode, this triggers collecting export values into handlers
             module.apply(lambda m: _set_export_mode(m, enabled=True))
             # temporarily disable input caching to avoid collectives empty debug values
@@ -84,8 +77,29 @@ class ONNXBaseManager(BaseManager, ABC):
             module.apply(lambda m: _restore_inp_caching_mode(m))
             module.apply(lambda m: _set_export_mode(m, enabled=False))
             module.train(training_state)
-            # do some cleanup on the exported ONNX model
-            model = onnx.load(export_path)
-            model = opt.optimize(model, cls.onnx_passes)
-            model = cls.apply_model_transforms(model)
-            onnx.save(model, export_path)
+
+    @classmethod
+    def _postprocess_export(cls, export_path):
+        # do some cleanup on the exported ONNX model
+        model = onnx.load(export_path)
+        model = opt.optimize(model, cls.onnx_passes)
+        model = cls.apply_model_transforms(model)
+        onnx.save(model, export_path)
+
+    @classmethod
+    def export_onnx(
+            cls,
+            module: Module,
+            input_shape: Tuple[int, ...],
+            export_path: str,
+            input_t: Optional[Union[Tensor, QuantTensor]] = None,
+            **kwargs):
+        """
+        * input_shape : tuple describing the shape of network input e.g. (1, 1, 28, 28)
+        * export_path : ONNX filename to export to
+        * input_t : if specified, do an initial forward pass with this value. this
+                    may be necessary for QuantTensor caching.
+        * **kwargs : will be passed as kwargs to torch.onnx.export
+        """
+        cls._export_impl(module, input_shape, export_path, input_t, **kwargs)
+        cls._postprocess_export(export_path)

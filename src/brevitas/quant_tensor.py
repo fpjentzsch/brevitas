@@ -91,6 +91,17 @@ class QuantTensor(NamedTuple):
         else:
             return False
 
+    @property
+    def device(self):
+        value_device = self.value.device
+        is_same_device = True
+        for t in [self.scale, self.zero_point, self.bit_width]:
+            if t is not None:
+                is_same_device &= value_device == t.device
+        if not is_same_device:
+            raise RuntimeError("Value and metadata are on different devices")
+        return value_device
+
     def set(self, **kwargs):
         return self._replace(**kwargs)
 
@@ -177,7 +188,7 @@ class QuantTensor(NamedTuple):
     def cat(tensor_list, dim):
         assert len(tensor_list) >= 2, 'Two or more tensors required for concatenation'
         first_qt = tensor_list[0]
-        if all([qt.is_valid for qt in tensor_list]):
+        if all([qt.is_not_none for qt in tensor_list]):
             for qt in tensor_list[1:]:
                 QuantTensor.check_input_type(qt)
                 first_qt.check_scaling_factors_same(qt)
@@ -223,8 +234,7 @@ class QuantTensor(NamedTuple):
                 training=self.training)
 
     def __add__(self, other):
-        QuantTensor.check_input_type(other)
-        if self.is_valid and other.is_valid:
+        if isinstance(other, QuantTensor) and self.is_not_none and other.is_not_none:
             self.check_scaling_factors_same(other)
             self.check_zero_points_same(other)
             output_value = self.value + other.value
@@ -242,14 +252,20 @@ class QuantTensor(NamedTuple):
                 bit_width=output_bit_width,
                 signed=output_signed,
                 training=output_training)
+        elif isinstance(other, QuantTensor):
+            output= QuantTensor(self.value + other.value)
         else:
-            output_value = self.value + other.value
-            output = QuantTensor(output_value)
+            output = QuantTensor(self.value + other)
         return output
 
+    def __radd__(self, other):
+        return self.__add__(other)
+
+    def __rmul__(self, other):
+        return self.__mul__(other)
+
     def __mul__(self, other):
-        QuantTensor.check_input_type(other)
-        if self.is_valid and other.is_valid:
+        if isinstance(other, QuantTensor) and self.is_not_none and other.is_not_none:
             output_value = self.value * other.value
             output_scale = self.scale * other.scale
             output_bit_width = self.bit_width + other.bit_width
@@ -266,17 +282,18 @@ class QuantTensor(NamedTuple):
                 bit_width=output_bit_width,
                 signed=output_signed,
                 training=output_training)
-        else:
+        elif isinstance(other, QuantTensor):
             output_value = self.value * other.value
             output = QuantTensor(output_value)
+        else:
+            output = QuantTensor(self.value + other)
         return output
 
     def __sub__(self, other):
         return self.__add__(- other)
 
     def __truediv__(self, other):
-        QuantTensor.check_input_type(other)
-        if self.is_valid and other.is_valid:
+        if isinstance(other, QuantTensor) and self.is_not_none and other.is_not_none:
             output_tensor = self.value / other.tensor
             output_scale = self.scale / other.scale
             output_bit_width = self.bit_width - other.bit_width
@@ -293,9 +310,10 @@ class QuantTensor(NamedTuple):
                 bit_width=output_bit_width,
                 signed=output_signed,
                 training=output_training)
+        elif isinstance(other, QuantTensor):
+            output = QuantTensor(self.value / other.value)
         else:
-            output_value = self.value / other.value
-            output = QuantTensor(output_value)
+            output = QuantTensor(self.value + other)
         return output
 
     def __abs__(self):
